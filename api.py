@@ -1,21 +1,21 @@
-from flask import Flask, jsonify, request, Response, send_file, current_app
+from flask import Flask, jsonify, request, Response, current_app, send_file
 from flask_httpauth import HTTPTokenAuth
 import traceback
 import logging
 import uuid
 import json
+import requests
 from functools import wraps
 from datetime import datetime, timedelta
-
 from redis import Redis
 import asyncio
 import os
 import threading
-from flask import send_from_directory
+import time
 
+import sync_inventory
 import sync_orders
 import sync_price
-from sync_inventory import sync_inventory
 import sync_update_listing
 from sync_down_catalogue import get_products_by_page
 
@@ -25,13 +25,65 @@ redis_client = Redis(host='localhost', port=6379, db=0)
 
 logging.basicConfig(filename="logs.log", level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
+# Airtable API details
+base_key = 'appd8lN3nYsIT139L'
+token = "patxr7JPJypDemRWQ.00484d9b9fc6dbb0fc4b3f8b0ab838a146a314df809048191d5cff9d6d64da1e"
+AIRTABLE_API_URL = f'https://api.airtable.com/v0/{base_key}/linnworks_suppliers'
 
-# Secure token and client storage (using a dictionary for example purposes, replace with a database in production)
-TOKENS = {}
-CLIENTS = {
-    "META100": "META472732"  # Example client_id and client_secret, replace with secure storage
-}
-SCOPES = ["read", "write"]  # Example scopes, replace with actual scopes required
+# In-memory cache for Airtable data
+supplier_cache = {}
+cache_lock = threading.Lock()
+
+# Set the interval for cache updates (30 minutes)
+CACHE_UPDATE_INTERVAL = 1800  # 30 minutes
+
+
+def fetch_suppliers():
+    global supplier_cache
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(AIRTABLE_API_URL, headers=headers)
+
+    if response.status_code != 200:
+        logging.error("Failed to fetch suppliers from Airtable")
+        return
+
+    suppliers = response.json().get('records', [])
+    with cache_lock:
+        supplier_cache = {}
+        total_records = len(suppliers)
+        valid_records = 0
+
+        for supplier in suppliers:
+            fields = supplier.get('fields', {})
+            client_id = fields.get('Client ID')
+            client_secret = fields.get('Client Secret')
+            live_status = fields.get('Live')
+
+
+            if client_id and client_secret and live_status:
+                supplier_cache[client_id] = {
+                    'Client Secret': client_secret,
+                    'Live': live_status
+                }
+                valid_records += 1
+            else:
+                logging.warning(f"Skipping supplier record due to missing fields: {supplier}")
+
+        logging.info(
+            f"Processed {total_records} records. Valid records: {valid_records}. Skipped records: {total_records - valid_records}.")
+
+
+def update_cache():
+    while True:
+        fetch_suppliers()
+        time.sleep(CACHE_UPDATE_INTERVAL)
+
+
+# Start the background thread to update the cache
+threading.Thread(target=update_cache, daemon=True).start()
 
 
 def handle_exception(f):
@@ -40,18 +92,10 @@ def handle_exception(f):
         try:
             return f(*args, **kwargs)
         except Exception as e:
-            # logging.error(f"Error in {f.__name__}: {str(e)}", exc_info=True)
             print(f"Error in {f.__name__}: {str(e)}")
             return jsonify({"Error": str(e), "Stack Trace": traceback.format_exc(), "AuthorizationToken": None}), 500
 
     return decorated
-
-
-@app.teardown_request
-def log_teardown(exception=None):
-    if exception:
-        logging.error(f"Teardown exception: {str(exception)}", exc_info=True)
-
 
 
 def generate_token():
@@ -62,7 +106,6 @@ def add_token(token, client_id, scope, expires_in=18600):
     expiration_time = datetime.utcnow() + timedelta(seconds=expires_in)
     token_data = {'client_id': client_id, 'scope': scope, 'expires_at': expiration_time.isoformat()}
     redis_client.set(token, json.dumps(token_data), ex=expires_in)
-    #logging.info(f"Token added: {token} for client {client_id} with scope {scope}, expires at {expiration_time}")
 
 
 @auth.verify_token
@@ -71,20 +114,19 @@ def verify_token(token):
     if token_data_json:
         token_data = json.loads(token_data_json)
         if datetime.fromisoformat(token_data['expires_at']) > datetime.utcnow():
-            #logging.info(f"Token found: {token}, expires at {token_data['expires_at']}")
             return token_data['client_id']
-    #logging.info(f"Token invalid or expired: {token}")
     return None
 
 
-@app.before_request
-def check_token():
-    if request.method != 'OPTIONS':  # Skip for CORS preflight requests
-        auth_header = request.headers.get('Authorization')
-        if auth_header:
-            token = auth_header.split()[-1]
-            if not verify_token(token):
-                return jsonify({"Error": "Invalid or expired token"}), 401
+def validate_client(client_id, client_secret):
+    print(client_id, client_secret)
+    with cache_lock:
+        supplier_info = supplier_cache.get(client_id)
+
+    if not supplier_info:
+        return False
+
+    return (supplier_info['Client Secret'] == client_secret and supplier_info['Live'] in ['Yes', 'No'])
 
 
 @app.route('/api/oauth/authorize', methods=['POST'])
@@ -94,23 +136,20 @@ def authorize():
     client_id = request.form.get('client_id')
     client_secret = request.form.get('client_secret')
     scope = request.form.get('scope')
-    # Validate grant_type
+
     if grant_type != 'client_credentials':
         logging.info("unsupported_grant_type")
         return jsonify({"error": "unsupported_grant_type"}), 400
 
-    # Validate client_id and client_secret
-    if CLIENTS.get(client_id) != client_secret:
+    if not validate_client(client_id, client_secret):
         logging.info("invalid_client")
         return jsonify({"error": "invalid_client"}), 401
 
-    # Validate scope
     requested_scopes = scope.split()
-    if not all(s in SCOPES for s in requested_scopes):
+    if not all(s in ["read", "write"] for s in requested_scopes):
         logging.info("invalid_scope")
         return jsonify({"error": "invalid_scope"}), 400
 
-    # Generate and store token
     access_token = generate_token()
     add_token(access_token, client_id, scope)
     return jsonify({
@@ -229,9 +268,8 @@ config_items = [
 @add_token_to_response
 @handle_exception
 def orders():
-    data = request.get_json()
-    date_str = data.get('UTCTimeFrom')
-    linnworks_data = sync_orders.get_orders(True)
+    client_id = auth.current_user()
+    linnworks_data = sync_orders.get_orders(client_id, True)
     return linnworks_data, 200
 
 
@@ -250,9 +288,9 @@ def despatch():
     }
 
     response = sync_orders.send_despatch_request(despatch_data)
-    print (f' output {response}')
+    print(f' output {response}')
     if response is None:
-        return jsonify({"Error": "Failed to send despatch request", "Orders": []}), 500
+        return jsonify({"Error": "Failed to send dispatch request", "Orders": []}), 500
 
     return response, 200
 
@@ -283,7 +321,7 @@ def get_products():
     page_number = data.get('PageNumber', 1)
 
     # Fetch products for the requested page
-    result = get_products_by_page(page_number)
+    result = get_products_by_page(page_number, client_id)
     products = result['Products']
     has_more_pages = result['HasMorePages']
 
@@ -291,10 +329,10 @@ def get_products():
 
     # Format the products
     formatted_products = [{
-        "SKU": product['fields'].get('Mazuma Variant SKU'),
+        "SKU": product['fields'].get('Supplier Variant SKU'),
         "Title": product['fields'].get('Title'),
-        "Quantity": product['fields'].get('Mazuma Variant Inventory Qty', 0),
-        "Price": product['fields'].get('Mazuma Buy Price', 0.0),
+        "Quantity": product['fields'].get('Supplier Variant Inventory Qty', 0),
+        "Price": product['fields'].get('Supplier Buy Price', 0.0),
         "Reference": product['id']
     } for product in products]
 
@@ -326,7 +364,9 @@ def run_sync_inventory(data):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     print("run_sync_inventory")
-    loop.run_until_complete(sync_inventory(data))
+    client_id = auth.current_user()
+
+    loop.run_until_complete(sync_inventory.sync_inventory(data, supplier_name=client_id))
 
 
 @app.route('/api/Product/InventoryUpdate', methods=['POST'])
@@ -340,10 +380,10 @@ def inventory_update():
     return {"Error": None}, 200
 
 
-def run_sync_price(data):
+def run_sync_price(data, supplier_name):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(sync_price.sync_price(data))
+    loop.run_until_complete(sync_price.sync_price(data, supplier_name=supplier_name))
 
 
 @app.route('/api/Product/PriceUpdate', methods=['POST', 'GET'])
@@ -352,8 +392,9 @@ def run_sync_price(data):
 @handle_exception
 def price_update():
     data = request.get_json()
-    threading.Thread(target=run_sync_price, args=(data,)).start()
-    #logging.info("Update Price")
+    client_id = auth.current_user()
+    threading.Thread(target=run_sync_price, args=(data, client_id)).start()
+    # logging.info("Update Price")
     return {"Error": None}, 200
 
 
@@ -364,7 +405,7 @@ def price_update():
 def listing_update():
     data = request.get_json()
     sync_update_listing.sync_catalogue.sync_catalogue(data)
-    #logging.info("sync_catalogue")
+    # logging.info("sync_catalogue")
     return {
         "Error": None,
         "Products": [

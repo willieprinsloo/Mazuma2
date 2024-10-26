@@ -5,15 +5,26 @@ import logging
 
 json_string = {
     "Products": [
-        {"SKU": "TEST1", "Reference": "recM3yHPDPkc5lbX3", "Quantity": 20},
-        {"SKU": "TEST2", "Reference": "rec4u2gCGHkV7RrA0", "Quantity": 30},
+        {"SKU": "1", "Reference": "recM3yHPDPkc5lbX3", "Quantity": 20},
+        {"SKU": "2", "Reference": "rec4u2gCGHkV7RrA0", "Quantity": 30},
+        {"SKU": "3", "Reference": "recM3yHPDPkc5lbX3", "Quantity": 20},
+        {"SKU": "4", "Reference": "rec4u2gCGHkV7RrA0", "Quantity": 30},
+        {"SKU": "5", "Reference": "recM3yHPDPkc5lbX3", "Quantity": 20},
+        {"SKU": "6", "Reference": "rec4u2gCGHkV7RrA0", "Quantity": 30},
+        {"SKU": "7", "Reference": "recM3yHPDPkc5lbX3", "Quantity": 20},
+        {"SKU": "8", "Reference": "rec4u2gCGHkV7RrA0", "Quantity": 30},
     ]
 }
 
 # Airtable API details
 base_key = 'appd8lN3nYsIT139L'
 token = "patxr7JPJypDemRWQ.00484d9b9fc6dbb0fc4b3f8b0ab838a146a314df809048191d5cff9d6d64da1e"
-AIRTABLE_API_URL = f'https://api.airtable.com/v0/{base_key}/Products'
+
+#Production
+#AIRTABLE_API_URL = f'https://api.airtable.com/v0/{base_key}/Products'
+AIRTABLE_API_URL = f'https://api.airtable.com/v0/{base_key}/Productsv2'
+
+
 
 headers = {
     'Authorization': f'Bearer {token}',
@@ -21,16 +32,20 @@ headers = {
 }
 
 # Function to find records by SKU in batches
-async def find_records_by_skus(session, skus, batch_size=50):
+async def find_records_by_skus(session, skus, supplier_name, batch_size=50):
     record_ids = {}
     for i in range(0, len(skus), batch_size):
         batch = skus[i:i + batch_size]
-        formula = 'OR(' + ','.join([f"{{Mazuma Variant SKU}}='{sku}'" for sku in batch]) + ')'
+
+        formula = 'OR(' + ','.join(
+            [f"AND({{Supplier Variant SKU}}='{sku}', {{Supplier Name}}='{supplier_name}')" for sku in batch]) + ')'
+
+        print (formula)
         params = {'filterByFormula': formula}
         try:
             async with session.get(AIRTABLE_API_URL, headers=headers, params=params) as response:
                 if response.status == 200:
-                    batch_records = {record['fields']['Mazuma Variant SKU']: record['id'] for record in
+                    batch_records = {record['fields']['Supplier Variant SKU']: record['id'] for record in
                                      (await response.json()).get('records', [])}
                     record_ids.update(batch_records)
                     logging.info(f"Fetched records for batch {i // batch_size + 1}: {batch_records}")
@@ -41,13 +56,14 @@ async def find_records_by_skus(session, skus, batch_size=50):
     return record_ids
 
 # Function to sync data with Airtable in bulk
-async def sync_inventory(data):
+async def sync_inventory(data, supplier_name):
     logging.info("Inventory sync started")
     current_date = datetime.now().strftime('%Y-%m-%d')
+
     skus = [product['SKU'] for product in data['Products']]
 
     async with aiohttp.ClientSession() as session:
-        record_ids = await find_records_by_skus(session, skus)
+        record_ids = await find_records_by_skus(session,supplier_name=supplier_name , skus=skus)
         records_to_update = []
         records_to_create = []
 
@@ -57,22 +73,22 @@ async def sync_inventory(data):
                 record = {
                     'id': record_id,
                     'fields': {
-                        'Mazuma Variant SKU': product['SKU'],
-                        'Mazuma LW Reference': product['Reference'],
-                        'Mazuma Variant Inventory Qty': product['Quantity'],
-                        'Mazuma LastQtyUpdated': current_date
+                        'Supplier Variant SKU': product['SKU'],
+                        'Supplier LW Reference': product['Reference'],
+                        'Supplier Variant Inventory Qty': product['Quantity'],
+                        'Supplier LastQtyUpdated': current_date
                     }
                 }
                 records_to_update.append(record)
             else:
                 logging.info(f"Record with SKU {product['SKU']} not found. Adding new record.")
-                print (f"Record with SKU {product['SKU']} not found. Adding new record.")
+                print(f"Record with SKU {product['SKU']} not found. Adding new record.")
                 record = {
                     'fields': {
-                        'Mazuma Variant SKU': product['SKU'],
-                        'Mazuma LW Reference': product['Reference'],
-                        'Mazuma Variant Inventory Qty': product['Quantity'],
-                        'Mazuma LastQtyUpdated': current_date
+                        'Supplier Variant SKU': product['SKU'],
+                        'Supplier LW Reference': product['Reference'],
+                        'Supplier Variant Inventory Qty': product['Quantity'],
+                        'Supplier LastQtyUpdated': current_date
                     }
                 }
                 records_to_create.append(record)
@@ -93,6 +109,7 @@ async def batch_update(session, records):
         await asyncio.sleep(1)  # To respect Airtable rate limits
         logging.info(f'Updating batch {i // 10 + 1}: {batch}')  # Debugging log
         try:
+            print (data)
             async with session.patch(AIRTABLE_API_URL, headers=headers, json=data) as response:
                 if response.status in [200, 201]:
                     logging.info(f'Successfully updated records for batch (Inventory) {i // 10 + 1}')
@@ -121,13 +138,13 @@ async def batch_create(session, records):
 
 # Example of how to run the sync_inventory function
 if __name__ == "__main__":
-    asyncio.run(sync_inventory(json_string))
+    asyncio.run(sync_inventory(json_string,supplier_name='MAZUMA'))
 
 # Function to run sync periodically
-async def run_periodically(data, interval):
+async def run_periodically(data, interval, supplier_name):
     while True:
         logging.info("Periodic sync started")
-        await sync_inventory(data)
+        await sync_inventory(data, supplier_name)
         await asyncio.sleep(interval)
 
 def start_periodic_sync():

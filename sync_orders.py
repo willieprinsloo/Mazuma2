@@ -9,14 +9,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Airtable API details
 base_key = 'appd8lN3nYsIT139L'
-# order_table_name = 'tblFTqunnttjGIC6n'
-# order_view_name = 'viwjI2Osg5PGWIbJJ'
-# line_items_table_name = 'tblGUEwtLKCwS2LAo'
+order_table_name = 'tblGj6D9MkzvcqIWY'
+order_view_name = 'viwk8IXeFWVSsqhzk'
+line_items_table_name = 'tbl7Bvy9ZLLMh3Xyj'
 
 # Production
-order_table_name = 'tbleRUUaL4t4TfPEf'
-order_view_name = 'viwSGwefEGPr9fohB'
-line_items_table_name = 'tblQJYV5oc6EvSVuu'
+#order_table_name = 'tbleRUUaL4t4TfPEf'
+#order_view_name = 'viwSGwefEGPr9fohB'
+#line_items_table_name = 'tblQJYV5oc6EvSVuu'
 
 token = "patxr7JPJypDemRWQ.00484d9b9fc6dbb0fc4b3f8b0ab838a146a314df809048191d5cff9d6d64da1e"
 
@@ -37,7 +37,7 @@ headers = {
 def update_order_status(order_id, status):
     update_data = {
         "fields": {
-            "Linnworks Fulfilment Status": status
+            "Supplier Fulfilment Status": status
         }
     }
     try:
@@ -142,13 +142,13 @@ def print_and_email_dispatched_orders(despatch_response):
         print("No dispatched orders to print or email.")
 
 
-def get_orders(update_status = False):
+def get_orders(client_id, update_status = False):
     def fetch_orders():
         five_days_ago = datetime.now() - timedelta(days=4)
         filter_formula = f'''
         AND(
-            FIND("MAZUMA", {{Fulfillment Location (from Order Line Items)}}) > 0,
-            {{Linnworks Fulfilment Status}}=BLANK(),     
+            FIND("{client_id}", {{Fulfillment Location (from Order Line Items)}}) > 0,
+            {{Supplier Fulfilment Status}}=BLANK(),     
             {{Fulfillment Status Latest}} != "Cancelled",
             IS_AFTER({{Shopify Order Date}}, "{five_days_ago.isoformat()}"),
             OR(
@@ -451,6 +451,4 @@ def batch_update(records):
         except requests.exceptions.RequestException as e:
             logging.error(f'Requests exception for batch {i // 10 + 1}: {e}')
 
-
 print(get_orders(False))
-## Mazuma Variant SKU

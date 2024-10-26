@@ -2,17 +2,13 @@ import requests
 import json
 
 # Set the URLs for the endpoints
-#AUTH_URL = "http://localhost:8000/api/oauth/authorize"
-#ORDERS_URL = "http://localhost:8000/api/Order/Orders"  # Change this to your actual endpoint
-
-AUTH_URL = "http://works.reboxed.co/api/oauth/authorize"
-ORDERS_URL = "http://works.reboxed.co/api/Order/Orders"
-
+AUTH_URL = "http://localhost:8000/api/oauth/authorize"
+ORDERS_URL = "http://localhost:8000/api/Order/Orders"  # Change this to your actual endpoint
 
 # Data for obtaining the access token
 AUTH_DATA = {
     'grant_type': 'client_credentials',
-    'client_id': 'META100',
+    'client_id': 'REBOXED',
     'client_secret': 'META472732',
     'scope': 'read write'
 }
